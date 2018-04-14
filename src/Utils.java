@@ -16,4 +16,10 @@ public class Utils {
         }
         return result;
     }
+
+    public static long randomLong(double limit) {
+        long leftLimit = 1L;
+        long rightLimit = 10L;
+        return leftLimit + (long) (Math.random() * (rightLimit - leftLimit)) % (long)limit;
+    }
 }

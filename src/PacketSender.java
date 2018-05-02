@@ -3,11 +3,11 @@ import java.util.concurrent.TimeUnit;
 
 class PacketSender implements Runnable {
 
-    private EnhancedDatagramSocket socket;
+    private MyTCPSocket socket;
     private MyTCPPacket lastSentPacket;
     private boolean isPacketSet = false;
 
-    public PacketSender(EnhancedDatagramSocket socket) {
+    public PacketSender(MyTCPSocket socket) {
         super();
         this.socket = socket;
     }
@@ -28,7 +28,7 @@ class PacketSender implements Runnable {
                 try {
                     if(isPacketSet) {
                         try {
-                            socket.send(lastSentPacket);
+                            socket.datagramSend(lastSentPacket);
                         } catch (IOException e) {
                             e.printStackTrace();
                         }

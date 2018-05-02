@@ -1,7 +1,5 @@
 import java.io.IOException;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.SocketException;
+import java.net.*;
 import java.util.Random;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -9,8 +7,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.Date;
 
 public class EnhancedDatagramSocket extends DatagramSocket {
+    int port;
     public EnhancedDatagramSocket(int port) throws SocketException {
         super(port);
+        this.port = port;
         randomGenerator = new Random(System.currentTimeMillis());
         payloadLimitInBytes = DEFAULT_PAYLOAD_LIMIT_IN_BYTES;
         lossRate = DEFAULT_LOSS_RATE;

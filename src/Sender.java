@@ -1,8 +1,17 @@
 public class Sender {
+
     public static void main(String[] args) throws Exception {
-        TCPSocket tcpSocket = new MyTCPSocket("127.0.0.1", 12345);
-        tcpSocket.send("sending.mp3");
-        tcpSocket.close();
-        tcpSocket.saveCongestionWindowPlot();
+        MyTCPSocket tcpSocket = new MyTCPSocket(Config.SERVER_IP, Config.SERVER_PORT);
+        tcpSocket.connect(Config.SERVER_IP, Config.SERVER_PORT);
+
+        MyTCPPacket packet = new MyTCPPacket();
+
+        byte[] data = new byte[20];
+        packet.setData(data);
+        tcpSocket.datagramSend(packet);
+
+//        tcpSocket.send("sending.mp3");
+////        tcpSocket.close();
+////        tcpSocket.saveCongestionWindowPlot();
     }
 }

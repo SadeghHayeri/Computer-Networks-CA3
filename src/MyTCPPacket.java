@@ -1,4 +1,5 @@
 import java.lang.reflect.Array;
+import java.net.DatagramPacket;
 import java.util.Arrays;
 
 public class MyTCPPacket {
@@ -20,7 +21,7 @@ public class MyTCPPacket {
     public boolean SYN = false;
     public boolean FIN = false;
 
-    private long windowSize = 0;
+    private long windowSize = 5;
     private long checksum = 0;
     private long urgentPointer = 0;
 
@@ -211,5 +212,9 @@ public class MyTCPPacket {
 
     public void setData(byte[] data) {
         this.data = data;
+    }
+
+    public String toString() {
+        return String.format("SYN: %s - ACK: %s - DataLength: %d - SYN(%d) - ACK(%d)", SYN?"YES":"NO", ACK?"YES":"NO", data.length, sequenceNumber, acknowledgmentNumber);
     }
 }

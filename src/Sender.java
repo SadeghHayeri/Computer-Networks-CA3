@@ -1,8 +1,20 @@
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+
 public class Sender {
+
     public static void main(String[] args) throws Exception {
-        TCPSocket tcpSocket = new MyTCPSocket("127.0.0.1", 12345);
-        tcpSocket.send("sending.mp3");
-        tcpSocket.close();
-        tcpSocket.saveCongestionWindowPlot();
+        MyTCPSocket tcpSocket = new MyTCPSocket(Config.SERVER_IP, Config.SERVER_PORT);
+
+        System.out.println("go to connect!");
+        tcpSocket.connect(Config.SERVER_IP, Config.SERVER_PORT);
+        System.out.println("connected!");
+
+        System.out.println("start!");
+        tcpSocket.send("A.pdf");
+        System.out.println("end!");
+
+        while (true);
     }
 }

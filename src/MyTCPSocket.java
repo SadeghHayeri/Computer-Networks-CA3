@@ -1,11 +1,14 @@
 import sun.awt.Mutex;
+import sun.nio.ch.IOUtil;
 
-import java.io.IOException;
+import java.io.*;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.net.SocketException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 public class MyTCPSocket extends TCPSocket {
@@ -16,10 +19,10 @@ public class MyTCPSocket extends TCPSocket {
     private int destinationPort;
 
     private ReceiveHandler receiveHandler;
-    private Thread receiveHandlerTread;
+    private Thread receiveHandlerThread;
 
     private SenderHandler senderHandler;
-    private Thread SenderHandlerTread;
+    private Thread senderHandlerThread;
 
     private long sourceSequenceNumber;
     private long destinationSequenceNumber;
@@ -41,16 +44,24 @@ public class MyTCPSocket extends TCPSocket {
         this.destinationPort = port;
         this.socket = new EnhancedDatagramSocket(Config.CLIENT_PORT);
         this.socket.connect(destinationIp, port);
+
+        this.senderHandler = new SenderHandler(this);
+        this.senderHandlerThread = new Thread(senderHandler);
+        this.senderHandlerThread.start();
     }
 
     public MyTCPSocket(int port) throws SocketException {
         this.socket = new EnhancedDatagramSocket(port);
+
+//        this.senderHandler = new SenderHandler(this);
+//        this.senderHandlerThread = new Thread(senderHandler);
+//        this.senderHandlerThread.start();
     }
 
     class SenderHandler implements Runnable {
 
         private MyTCPSocket socket;
-        private int windowSize = 1;
+        private int windowSize = 100;
         private long timer = 0;
         private long lastTime = System.currentTimeMillis();
 
@@ -73,6 +84,10 @@ public class MyTCPSocket extends TCPSocket {
         @Override
         public void run() {
             while(true) {
+
+                System.out.println(String.format("send queue: %d", sendQueue.size()));
+                System.out.println(String.format("window queue: %d", windowQueue.size()));
+
                 long now = System.currentTimeMillis();
                 timer += (now - lastTime);
                 lastTime = now;
@@ -87,8 +102,8 @@ public class MyTCPSocket extends TCPSocket {
                 sendQueueMutex.lock();
                 {
                     int windowDiff = windowSize - windowQueue.size();
-                    if (!sendQueue.isEmpty()) {
-                        for (int i = 0; i < windowDiff; i++) {
+                    for (int i = 0; i < windowDiff; i++) {
+                        if (!sendQueue.isEmpty()) {
                             MyTCPPacket packet = sendQueue.poll();
                             try {
                                 socket.datagramSendPacket(packet);
@@ -134,10 +149,9 @@ public class MyTCPSocket extends TCPSocket {
         public void run() {
             while (true) {
                 try {
-                    System.out.println(state);
-                    System.out.println("poshte receive");
-                    MyTCPPacket receivedPacket = receive();
-                    System.out.println("gereftam");
+                    MyTCPPacket receivedPacket = datagramReceivePacket();
+                    System.out.println(String.format("new packet - %s", state));
+                    System.out.println(receivedPacket.toString());
 
                     if(receivedPacket.RST)
                         state = State.LISTEN;
@@ -207,6 +221,7 @@ public class MyTCPSocket extends TCPSocket {
                             }
 
                             else {
+                                System.out.println(String.format("%d - %d += %d", receivedPacket.getSequenceNumber(), destinationSequenceNumber, receivedPacket.getData().length));
                                 if(receivedPacket.getSequenceNumber() == destinationSequenceNumber) {
                                     destinationSequenceNumber += receivedPacket.getData().length;
                                     receivedQueueMutex.lock();
@@ -236,11 +251,12 @@ public class MyTCPSocket extends TCPSocket {
 
         // start receiver thread!
         receiveHandler = new ReceiveHandler(this);
-        receiveHandlerTread = new Thread(receiveHandler);
-        receiveHandlerTread.start();
+        receiveHandlerThread = new Thread(receiveHandler);
+        receiveHandlerThread.start();
 
         // stay for connection
         while (true) {
+            TimeUnit.MILLISECONDS.sleep(Config.TIMEOUT);
             if (state == State.ESTABLISHED)
                 return this;
         }
@@ -262,13 +278,15 @@ public class MyTCPSocket extends TCPSocket {
 
         // start receiver thread!
         receiveHandler = new ReceiveHandler(this, synPacket);
-        receiveHandlerTread = new Thread(receiveHandler);
-        receiveHandlerTread.start();
+        receiveHandlerThread = new Thread(receiveHandler);
+        receiveHandlerThread.start();
 
         // stay for connection
         while (true) {
-            if(state == State.ESTABLISHED)
+            TimeUnit.MILLISECONDS.sleep(Config.TIMEOUT);
+            if(state == State.ESTABLISHED) {
                 return;
+            }
         }
     }
 
@@ -276,7 +294,6 @@ public class MyTCPSocket extends TCPSocket {
         DatagramPacket packet = new DatagramPacket(
                 data, data.length, destinationIp, destinationPort);
         socket.send(packet);
-        System.out.print("send: "); System.out.println(Arrays.toString(data));
     }
 
     public void datagramSendPacket(MyTCPPacket packet) throws IOException {
@@ -302,11 +319,12 @@ public class MyTCPSocket extends TCPSocket {
         sendQueueMutex.unlock();
     }
 
-    public MyTCPPacket receive() {
+    public MyTCPPacket receive() throws InterruptedException {
         assert state == State.ESTABLISHED;
         receivedQueueMutex.lock();
         while (receivedQueue.isEmpty()) {
             receivedQueueMutex.unlock();
+            TimeUnit.MILLISECONDS.sleep(Config.TIMEOUT);
             receivedQueueMutex.lock();
         }
         MyTCPPacket packet = receivedQueue.poll();
@@ -317,13 +335,50 @@ public class MyTCPSocket extends TCPSocket {
     @Override
     public void send(String pathToFile) throws Exception {
         assert state == State.ESTABLISHED;
-        throw new RuntimeException("Not implemented!");
+        Path path = Paths.get(pathToFile);
+        byte[] data = Files.readAllBytes(path);
+
+        while (data.length > 0) {
+            int packetSize = Math.min(data.length, Config.MAX_SPLIT_SIZE);
+            byte[] packetData = Arrays.copyOfRange(data, 0, packetSize);
+            data = Arrays.copyOfRange(data, packetSize, data.length);
+
+            MyTCPPacket packet = new MyTCPPacket();
+            packet.setSequenceNumber(getSourceSequenceNumber(packetSize));
+            packet.setData(packetData);
+            send(packet);
+        }
+
+        // EOF -> no data!
+        MyTCPPacket packet = new MyTCPPacket();
+        packet.setSequenceNumber(getSourceSequenceNumber(0));
+        send(packet);
+
+        System.out.println(String.format("QUEUE SIZE: %d", sendQueue.size()));
+    }
+
+    private long getSourceSequenceNumber(long dataSize) {
+        long oldSeqNumber = sourceSequenceNumber;
+        sourceSequenceNumber += dataSize;
+        return oldSeqNumber;
     }
 
     @Override
     public void receive(String pathToFile) throws Exception {
         assert state == State.ESTABLISHED;
-        throw new RuntimeException("Not implemented!");
+        FileOutputStream stream = new FileOutputStream(pathToFile);
+        try {
+            while (true) {
+                MyTCPPacket packet = receive();
+
+                if(packet.getData().length == 0)
+                    break;
+
+                stream.write(packet.getData());
+            }
+        } finally {
+            stream.close();
+        }
     }
 
     @Override

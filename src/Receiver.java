@@ -7,12 +7,9 @@ public class Receiver {
         tcpSocket.accept();
 
         System.out.println("stay!");
-        MyTCPPacket packet = tcpSocket.receive();
+        tcpSocket.receive("B.pdf");
         System.out.println("received!");
-        System.out.println(packet);
 
-//        tcpSocket.receive("receiving.mp3");
-//        tcpSocket.close();
-//        tcpServerSocket.close();
+        while (true);
     }
 }

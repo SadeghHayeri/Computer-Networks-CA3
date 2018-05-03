@@ -213,4 +213,8 @@ public class MyTCPPacket {
     public void setData(byte[] data) {
         this.data = data;
     }
+
+    public String toString() {
+        return String.format("SYN: %s - ACK: %s - DataLength: %d - SYN(%d) - ACK(%d)", SYN?"YES":"NO", ACK?"YES":"NO", data.length, sequenceNumber, acknowledgmentNumber);
+    }
 }

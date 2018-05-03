@@ -1,9 +1,12 @@
+import sun.awt.Mutex;
+
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.net.SocketException;
-import java.util.Arrays;
-import java.util.Queue;
+import java.util.*;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 public class MyTCPSocket extends TCPSocket {
 
@@ -15,11 +18,18 @@ public class MyTCPSocket extends TCPSocket {
     private ReceiveHandler receiveHandler;
     private Thread receiveHandlerTread;
 
+    private SenderHandler senderHandler;
+    private Thread SenderHandlerTread;
+
     private long sourceSequenceNumber;
     private long destinationSequenceNumber;
 
-    Queue<MyTCPPacket> receivedQueue;
-    Queue<MyTCPPacket> sendQueue;
+    private Queue<MyTCPPacket> receivedQueue = new LinkedList<>();
+    private Mutex receivedQueueMutex = new Mutex();
+    private Queue<MyTCPPacket> sendQueue = new LinkedList<>();
+    private Mutex sendQueueMutex = new Mutex();
+    private Queue<MyTCPPacket> windowQueue = new LinkedList<>();
+    private Mutex windowQueueMutex = new Mutex();
 
     public enum State {
         CLOSED, LISTEN, SYN_RECEIVED, SYN_SEND, ESTABLISHED;
@@ -35,6 +45,66 @@ public class MyTCPSocket extends TCPSocket {
 
     public MyTCPSocket(int port) throws SocketException {
         this.socket = new EnhancedDatagramSocket(port);
+    }
+
+    class SenderHandler implements Runnable {
+
+        private MyTCPSocket socket;
+        private int windowSize = 1;
+        private long timer = 0;
+        private long lastTime = System.currentTimeMillis();
+
+        public SenderHandler(MyTCPSocket socket) {
+            this.socket = socket;
+        }
+
+        public void sendAllWindow() {
+            windowQueueMutex.lock();
+            for (MyTCPPacket packet : windowQueue) {
+                try {
+                    socket.datagramSendPacket(packet);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+            windowQueueMutex.unlock();
+        }
+
+        @Override
+        public void run() {
+            while(true) {
+                long now = System.currentTimeMillis();
+                timer += (now - lastTime);
+                lastTime = now;
+
+                if (timer > Config.TIMEOUT) {
+                    timer = 0;
+                    sendAllWindow();
+                }
+
+                // check window diff
+                windowQueueMutex.lock();
+                sendQueueMutex.lock();
+                {
+                    int windowDiff = windowSize - windowQueue.size();
+                    if (!sendQueue.isEmpty()) {
+                        for (int i = 0; i < windowDiff; i++) {
+                            MyTCPPacket packet = sendQueue.poll();
+                            try {
+                                socket.datagramSendPacket(packet);
+                                windowQueue.add(packet);
+                                timer = 0;
+                            } catch (IOException e) {
+                                sendQueue.add(packet);
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+                }
+                sendQueueMutex.unlock();
+                windowQueueMutex.unlock();
+            }
+        }
     }
 
     class ReceiveHandler implements Runnable {
@@ -65,7 +135,9 @@ public class MyTCPSocket extends TCPSocket {
             while (true) {
                 try {
                     System.out.println(state);
+                    System.out.println("poshte receive");
                     MyTCPPacket receivedPacket = receive();
+                    System.out.println("gereftam");
 
                     if(receivedPacket.RST)
                         state = State.LISTEN;
@@ -110,15 +182,41 @@ public class MyTCPSocket extends TCPSocket {
                         case ESTABLISHED:
                             packetSender.stop();
                             packetSenderThread.interrupt();
+
                             if(receivedPacket.SYN && receivedPacket.ACK) {
                                 MyTCPPacket ACKPacket = new MyTCPPacket();
                                 ACKPacket.ACK = true;
                                 long ackNumber = destinationSequenceNumber + receivedPacket.getData().length;
                                 ACKPacket.setAcknowledgmentNumber(ackNumber);
                                 socket.datagramSendPacket(ACKPacket);
-                                System.out.println("SYN - ACK");
-                            } else {
-                                System.out.println("data!");
+                            }
+
+                            else if(!receivedPacket.SYN && receivedPacket.ACK) {
+                                long ACKNumber = receivedPacket.getAcknowledgmentNumber();
+                                windowQueueMutex.lock();
+                                while (!windowQueue.isEmpty()) {
+                                    MyTCPPacket windowHeadPacket = windowQueue.peek();
+                                    long expectedACKNumber = windowHeadPacket.getSequenceNumber() + windowHeadPacket.getData().length;
+                                    if(ACKNumber >= expectedACKNumber) {
+                                        windowQueue.poll();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                windowQueueMutex.unlock();
+                            }
+
+                            else {
+                                if(receivedPacket.getSequenceNumber() == destinationSequenceNumber) {
+                                    destinationSequenceNumber += receivedPacket.getData().length;
+                                    receivedQueueMutex.lock();
+                                    receivedQueue.add(receivedPacket);
+                                    receivedQueueMutex.unlock();
+                                }
+                                MyTCPPacket ACKPacket = new MyTCPPacket();
+                                ACKPacket.ACK = true;
+                                ACKPacket.setAcknowledgmentNumber(destinationSequenceNumber);
+                                socket.datagramSendPacket(ACKPacket);
                             }
                             break;
                     }
@@ -199,12 +297,21 @@ public class MyTCPSocket extends TCPSocket {
 
     public void send(MyTCPPacket packet) {
         assert state == State.ESTABLISHED;
+        sendQueueMutex.lock();
         sendQueue.add(packet);
+        sendQueueMutex.unlock();
     }
 
     public MyTCPPacket receive() {
         assert state == State.ESTABLISHED;
-        return receivedQueue.poll();
+        receivedQueueMutex.lock();
+        while (receivedQueue.isEmpty()) {
+            receivedQueueMutex.unlock();
+            receivedQueueMutex.lock();
+        }
+        MyTCPPacket packet = receivedQueue.poll();
+        receivedQueueMutex.unlock();
+        return packet;
     }
 
     @Override

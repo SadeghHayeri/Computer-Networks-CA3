@@ -5,10 +5,10 @@ public class Sender {
         tcpSocket.connect(Config.SERVER_IP, Config.SERVER_PORT);
 
         MyTCPPacket packet = new MyTCPPacket();
+        packet.setData(new byte[20]);
 
-        byte[] data = new byte[20];
-        packet.setData(data);
-        tcpSocket.datagramSend(packet);
+        tcpSocket.send(packet);
+//        tcpSocket.datagramSend(packet);
 
 //        tcpSocket.send("sending.mp3");
 ////        tcpSocket.close();

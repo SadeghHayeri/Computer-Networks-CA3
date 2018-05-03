@@ -4,7 +4,7 @@ import java.util.concurrent.TimeUnit;
 class PacketSender implements Runnable {
 
     private MyTCPSocket socket;
-    private MyTCPPacket lastSentPacket;
+    private MyTCPPacket lastPacket;
     private boolean isPacketSet = false;
 
     public PacketSender(MyTCPSocket socket) {
@@ -13,7 +13,7 @@ class PacketSender implements Runnable {
     }
 
     public void setPacket(MyTCPPacket packet) {
-        this.lastSentPacket = packet;
+        this.lastPacket = packet;
         this.isPacketSet = true;
     }
 
@@ -28,7 +28,7 @@ class PacketSender implements Runnable {
                 try {
                     if(isPacketSet) {
                         try {
-                            socket.datagramSend(lastSentPacket);
+                            socket.datagramSendPacket(lastPacket);
                         } catch (IOException e) {
                             e.printStackTrace();
                         }

@@ -51,6 +51,8 @@ public class MyTCPSocket extends TCPSocket {
         this.senderHandler = new SenderHandler(this);
         this.senderHandlerThread = new Thread(senderHandler);
         this.senderHandlerThread.start();
+
+        connect();
     }
 
     public MyTCPSocket(int port) throws SocketException {
@@ -59,215 +61,6 @@ public class MyTCPSocket extends TCPSocket {
 //        this.senderHandler = new SenderHandler(this);
 //        this.senderHandlerThread = new Thread(senderHandler);
 //        this.senderHandlerThread.start();
-    }
-
-    class SenderHandler implements Runnable {
-
-        private MyTCPSocket socket;
-
-        private int windowSize = 1;
-        private long timer = 0;
-        private long lastTime = System.currentTimeMillis();
-
-        public int getWindowSize() {
-            return windowSize;
-        }
-
-        public void setWindowSize(int windowSize) {
-            this.windowSize = windowSize;
-        }
-
-        public SenderHandler(MyTCPSocket socket) {
-            this.socket = socket;
-        }
-
-        public void sendAllWindow() {
-            windowQueueMutex.lock();
-            for (MyTCPPacket packet : windowQueue) {
-                try {
-                    socket.datagramSendPacket(packet);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-            windowQueueMutex.unlock();
-        }
-
-        @Override
-        public void run() {
-            while(true) {
-
-                System.out.println(String.format("%d  %d(%d)", sendQueue.size(), windowSize, windowQueue.size()));
-
-                long now = System.currentTimeMillis();
-                timer += (now - lastTime);
-                lastTime = now;
-
-                if (timer > Config.TIMEOUT) {
-                    timer = 0;
-                    sendAllWindow();
-                }
-
-                // check window diff
-                windowQueueMutex.lock();
-                sendQueueMutex.lock();
-                {
-                    int windowDiff = windowSize - windowQueue.size();
-                    for (int i = 0; i < windowDiff; i++) {
-                        if (!sendQueue.isEmpty()) {
-                            MyTCPPacket packet = sendQueue.poll();
-                            try {
-                                socket.datagramSendPacket(packet);
-                                windowQueue.add(packet);
-                                timer = 0;
-                            } catch (IOException e) {
-                                sendQueue.add(packet);
-                                e.printStackTrace();
-                            }
-                        }
-                    }
-                }
-                sendQueueMutex.unlock();
-                windowQueueMutex.unlock();
-            }
-        }
-    }
-
-    class ReceiveHandler implements Runnable {
-
-        private MyTCPSocket socket;
-        PacketSender packetSender;
-        Thread packetSenderThread;
-
-
-        public ReceiveHandler(MyTCPSocket socket) {
-            this.socket = socket;
-            packetSender = new PacketSender(socket);
-            packetSenderThread = new Thread(packetSender);
-            packetSenderThread.start();
-        }
-
-        public ReceiveHandler(MyTCPSocket socket, MyTCPPacket packet) {
-            this.socket = socket;
-            packetSender = new PacketSender(socket);
-            packetSenderThread = new Thread(packetSender);
-            packetSenderThread.start();
-
-            packetSender.setPacket(packet);
-        }
-
-        @Override
-        public void run() {
-            while (true) {
-                try {
-                    MyTCPPacket receivedPacket = datagramReceivePacket();
-                    System.out.println(String.format("new packet - %s", state));
-                    System.out.println(receivedPacket.toString());
-
-                    if(receivedPacket.RST)
-                        state = State.LISTEN;
-
-                    switch (state) {
-                        case CLOSED:
-                            break;
-
-                        case LISTEN:
-                            if(receivedPacket.SYN) {
-                                state = State.SYN_RECEIVED;
-                                destinationSequenceNumber = receivedPacket.getSequenceNumber();
-
-                                MyTCPPacket packet = new MyTCPPacket();
-                                packet.SYN = true;
-                                packet.setSequenceNumber(sourceSequenceNumber);
-                                packet.ACK = true;
-                                long serverACKNumber = destinationSequenceNumber + receivedPacket.getData().length;
-                                packet.setAcknowledgmentNumber(serverACKNumber);
-                                packet.setData(Config.PHANTON_BYTE);
-                                packetSender.setPacket(packet);
-                            }
-                            break;
-
-                        case SYN_RECEIVED:
-                            if(receivedPacket.ACK) {
-                                boolean isExceptedACKNumber = receivedPacket.getAcknowledgmentNumber() == sourceSequenceNumber + 1;
-                                if (isExceptedACKNumber) {
-                                    state = State.ESTABLISHED;
-                                }
-                            }
-                            break;
-
-                        case SYN_SEND:
-                            boolean isExceptedACKNumber = receivedPacket.getAcknowledgmentNumber() == sourceSequenceNumber + 1;
-                            if(receivedPacket.SYN && receivedPacket.ACK && isExceptedACKNumber) {
-                                destinationSequenceNumber = receivedPacket.getSequenceNumber();
-                                state = State.ESTABLISHED;
-                            }
-                            break;
-
-                        case ESTABLISHED:
-                            packetSender.stop();
-                            packetSenderThread.interrupt();
-
-                            // SYN-ACK
-                            if(receivedPacket.SYN && receivedPacket.ACK) {
-                                MyTCPPacket ACKPacket = new MyTCPPacket();
-                                ACKPacket.ACK = true;
-                                long ackNumber = destinationSequenceNumber + receivedPacket.getData().length;
-                                ACKPacket.setAcknowledgmentNumber(ackNumber);
-                                socket.datagramSendPacket(ACKPacket);
-                            }
-
-                            // ACK
-                            else if(!receivedPacket.SYN && receivedPacket.ACK) {
-                                long ACKNumber = receivedPacket.getAcknowledgmentNumber();
-                                windowQueueMutex.lock();
-                                while (!windowQueue.isEmpty()) {
-                                    MyTCPPacket windowHeadPacket = windowQueue.peek();
-                                    long expectedACKNumber = windowHeadPacket.getSequenceNumber() + windowHeadPacket.getData().length;
-                                    if(ACKNumber >= expectedACKNumber) {
-                                        windowQueue.poll();
-
-                                        int windowSize = senderHandler.getWindowSize();
-                                        if(windowSize < threshold)
-                                            senderHandler.setWindowSize(windowSize + Config.MSS);
-                                        else
-                                            senderHandler.setWindowSize(windowSize + (int)(Math.pow(Config.MSS, 2) / windowSize));
-
-                                    } else {
-                                        duplicateACK++;
-                                        if(duplicateACK >= Config.MAX_DUPLICATE_ACK) {
-                                            threshold = senderHandler.getWindowSize() / 2;
-                                            senderHandler.setWindowSize(1);
-                                            duplicateACK = 0;
-                                        }
-                                        break;
-                                    }
-                                    onWindowChange();
-                                }
-                                windowQueueMutex.unlock();
-                            }
-
-                            // DATA
-                            else {
-                                System.out.println(String.format("%d - %d += %d", receivedPacket.getSequenceNumber(), destinationSequenceNumber, receivedPacket.getData().length));
-                                if(receivedPacket.getSequenceNumber() == destinationSequenceNumber) {
-                                    destinationSequenceNumber += receivedPacket.getData().length;
-                                    receivedQueueMutex.lock();
-                                    receivedQueue.add(receivedPacket);
-                                    receivedQueueMutex.unlock();
-                                }
-                                MyTCPPacket ACKPacket = new MyTCPPacket();
-                                ACKPacket.ACK = true;
-                                ACKPacket.setAcknowledgmentNumber(destinationSequenceNumber);
-                                socket.datagramSendPacket(ACKPacket);
-                            }
-                            break;
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            }
-        }
     }
 
     public MyTCPSocket accept() throws Exception {
@@ -290,11 +83,8 @@ public class MyTCPSocket extends TCPSocket {
         }
     }
 
-    public void connect(String ip, int port) throws Exception {
+    private void connect() throws Exception {
         state = State.SYN_SEND;
-
-        this.destinationIp = InetAddress.getByName(ip);
-        this.destinationPort = port;
 
         sourceSequenceNumber = 0;
 
@@ -408,7 +198,11 @@ public class MyTCPSocket extends TCPSocket {
 
     @Override
     public void close() throws Exception {
-        throw new RuntimeException("Not implemented!");
+//        senderHandler.stop();
+//        senderHandlerThread.interrupt();
+//        receiveHandler.stop();
+//        receiveHandlerThread.interrupt();
+//        socket.close();
     }
 
     @Override
@@ -419,5 +213,225 @@ public class MyTCPSocket extends TCPSocket {
     @Override
     public long getWindowSize() {
         return senderHandler.getWindowSize();
+    }
+
+
+    class SenderHandler implements Runnable {
+
+        private MyTCPSocket socket;
+
+        private int windowSize = 1;
+        private long timer = 0;
+        private long lastTime = System.currentTimeMillis();
+        private boolean running = true;
+
+        public int getWindowSize() {
+            return windowSize;
+        }
+
+        public void setWindowSize(int windowSize) {
+            this.windowSize = windowSize;
+        }
+
+        public SenderHandler(MyTCPSocket socket) {
+            this.socket = socket;
+        }
+
+        public void stop() {
+            running = false;
+        }
+
+        public void sendAllWindow() {
+            windowQueueMutex.lock();
+            for (MyTCPPacket packet : windowQueue) {
+                try {
+                    socket.datagramSendPacket(packet);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+            windowQueueMutex.unlock();
+        }
+
+        @Override
+        public void run() {
+            while(running) {
+
+                System.out.println(String.format("%d  %d(%d)", sendQueue.size(), windowSize, windowQueue.size()));
+
+                long now = System.currentTimeMillis();
+                timer += (now - lastTime);
+                lastTime = now;
+
+                if (timer > Config.TIMEOUT) {
+                    timer = 0;
+                    sendAllWindow();
+                }
+
+                // check window diff
+                windowQueueMutex.lock();
+                sendQueueMutex.lock();
+                {
+                    int windowDiff = windowSize - windowQueue.size();
+                    for (int i = 0; i < windowDiff; i++) {
+                        if (!sendQueue.isEmpty()) {
+                            MyTCPPacket packet = sendQueue.poll();
+                            try {
+                                socket.datagramSendPacket(packet);
+                                windowQueue.add(packet);
+                                timer = 0;
+                            } catch (IOException e) {
+                                sendQueue.add(packet);
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+                }
+                sendQueueMutex.unlock();
+                windowQueueMutex.unlock();
+            }
+        }
+    }
+
+    class ReceiveHandler implements Runnable {
+
+        private MyTCPSocket socket;
+        private PacketSender packetSender;
+        private Thread packetSenderThread;
+        private boolean running = true;
+
+        public ReceiveHandler(MyTCPSocket socket) {
+            this.socket = socket;
+            packetSender = new PacketSender(socket);
+            packetSenderThread = new Thread(packetSender);
+            packetSenderThread.start();
+        }
+
+        public ReceiveHandler(MyTCPSocket socket, MyTCPPacket packet) {
+            this.socket = socket;
+            packetSender = new PacketSender(socket);
+            packetSenderThread = new Thread(packetSender);
+            packetSenderThread.start();
+
+            packetSender.setPacket(packet);
+        }
+
+        public void stop() {
+            running = false;
+        }
+
+        @Override
+        public void run() {
+            while (running) {
+                try {
+                    MyTCPPacket receivedPacket = datagramReceivePacket();
+                    System.out.println(String.format("new packet - %s", state));
+                    System.out.println(receivedPacket.toString());
+
+                    if(receivedPacket.RST)
+                        state = MyTCPSocket.State.LISTEN;
+
+                    switch (state) {
+                        case CLOSED:
+                            break;
+
+                        case LISTEN:
+                            if(receivedPacket.SYN) {
+                                state = MyTCPSocket.State.SYN_RECEIVED;
+                                destinationSequenceNumber = receivedPacket.getSequenceNumber();
+
+                                MyTCPPacket packet = new MyTCPPacket();
+                                packet.SYN = true;
+                                packet.setSequenceNumber(sourceSequenceNumber);
+                                packet.ACK = true;
+                                long serverACKNumber = destinationSequenceNumber + receivedPacket.getData().length;
+                                packet.setAcknowledgmentNumber(serverACKNumber);
+                                packet.setData(Config.PHANTON_BYTE);
+                                packetSender.setPacket(packet);
+                            }
+                            break;
+
+                        case SYN_RECEIVED:
+                            if(receivedPacket.ACK) {
+                                boolean isExceptedACKNumber = receivedPacket.getAcknowledgmentNumber() == sourceSequenceNumber + 1;
+                                if (isExceptedACKNumber) {
+                                    state = MyTCPSocket.State.ESTABLISHED;
+                                }
+                            }
+                            break;
+
+                        case SYN_SEND:
+                            boolean isExceptedACKNumber = receivedPacket.getAcknowledgmentNumber() == sourceSequenceNumber + 1;
+                            if(receivedPacket.SYN && receivedPacket.ACK && isExceptedACKNumber) {
+                                destinationSequenceNumber = receivedPacket.getSequenceNumber();
+                                state = MyTCPSocket.State.ESTABLISHED;
+                            }
+                            break;
+
+                        case ESTABLISHED:
+                            packetSender.stop();
+                            packetSenderThread.interrupt();
+
+                            // SYN-ACK
+                            if(receivedPacket.SYN && receivedPacket.ACK) {
+                                MyTCPPacket ACKPacket = new MyTCPPacket();
+                                ACKPacket.ACK = true;
+                                long ackNumber = destinationSequenceNumber + receivedPacket.getData().length;
+                                ACKPacket.setAcknowledgmentNumber(ackNumber);
+                                socket.datagramSendPacket(ACKPacket);
+                            }
+
+                            // ACK
+                            else if(!receivedPacket.SYN && receivedPacket.ACK) {
+                                long ACKNumber = receivedPacket.getAcknowledgmentNumber();
+                                windowQueueMutex.lock();
+                                while (!windowQueue.isEmpty()) {
+                                    MyTCPPacket windowHeadPacket = windowQueue.peek();
+                                    long expectedACKNumber = windowHeadPacket.getSequenceNumber() + windowHeadPacket.getData().length;
+                                    if(ACKNumber >= expectedACKNumber) {
+                                        windowQueue.poll();
+
+                                        int windowSize = senderHandler.getWindowSize();
+                                        if(windowSize < threshold)
+                                            senderHandler.setWindowSize(windowSize + Config.MSS);
+                                        else
+                                            senderHandler.setWindowSize(windowSize + (int)(Math.pow(Config.MSS, 2) / windowSize));
+                                        duplicateACK = 0;
+
+                                    } else {
+                                        duplicateACK++;
+                                        if(duplicateACK >= Config.MAX_DUPLICATE_ACK) {
+                                            threshold = senderHandler.getWindowSize() / 2;
+                                            senderHandler.setWindowSize(1);
+                                            duplicateACK = 0;
+                                        }
+                                        break;
+                                    }
+                                    onWindowChange();
+                                }
+                                windowQueueMutex.unlock();
+                            }
+
+                            // DATA
+                            else {
+                                System.out.println(String.format("%d - %d += %d", receivedPacket.getSequenceNumber(), destinationSequenceNumber, receivedPacket.getData().length));
+                                if(receivedPacket.getSequenceNumber() == destinationSequenceNumber) {
+                                    destinationSequenceNumber += receivedPacket.getData().length;
+                                    receivedQueueMutex.lock();
+                                    receivedQueue.add(receivedPacket);
+                                    receivedQueueMutex.unlock();
+                                }
+                                MyTCPPacket ACKPacket = new MyTCPPacket();
+                                ACKPacket.ACK = true;
+                                ACKPacket.setAcknowledgmentNumber(destinationSequenceNumber);
+                                socket.datagramSendPacket(ACKPacket);
+                            }
+                            break;
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
     }
 }

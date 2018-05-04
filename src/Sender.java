@@ -6,14 +6,13 @@ public class Sender {
 
     public static void main(String[] args) throws Exception {
         MyTCPSocket tcpSocket = new MyTCPSocket(Config.SERVER_IP, Config.SERVER_PORT);
-
-        System.out.println("go to connect!");
         tcpSocket.connect(Config.SERVER_IP, Config.SERVER_PORT);
-        System.out.println("connected!");
 
         System.out.println("start!");
-        tcpSocket.send("A.pdf");
+        tcpSocket.send("A");
         System.out.println("end!");
+
+        tcpSocket.saveCongestionWindowPlot();
 
         while (true);
     }

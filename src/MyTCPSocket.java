@@ -27,6 +27,9 @@ public class MyTCPSocket extends TCPSocket {
     private long sourceSequenceNumber;
     private long destinationSequenceNumber;
 
+    private long threshold = Config.STARTING_THRESHOLD;
+    private long duplicateACK = 0;
+
     private Queue<MyTCPPacket> receivedQueue = new LinkedList<>();
     private Mutex receivedQueueMutex = new Mutex();
     private Queue<MyTCPPacket> sendQueue = new LinkedList<>();
@@ -61,9 +64,18 @@ public class MyTCPSocket extends TCPSocket {
     class SenderHandler implements Runnable {
 
         private MyTCPSocket socket;
-        private int windowSize = 100;
+
+        private int windowSize = 1;
         private long timer = 0;
         private long lastTime = System.currentTimeMillis();
+
+        public int getWindowSize() {
+            return windowSize;
+        }
+
+        public void setWindowSize(int windowSize) {
+            this.windowSize = windowSize;
+        }
 
         public SenderHandler(MyTCPSocket socket) {
             this.socket = socket;
@@ -85,8 +97,7 @@ public class MyTCPSocket extends TCPSocket {
         public void run() {
             while(true) {
 
-                System.out.println(String.format("send queue: %d", sendQueue.size()));
-                System.out.println(String.format("window queue: %d", windowQueue.size()));
+                System.out.println(String.format("%d  %d(%d)", sendQueue.size(), windowSize, windowQueue.size()));
 
                 long now = System.currentTimeMillis();
                 timer += (now - lastTime);
@@ -197,6 +208,7 @@ public class MyTCPSocket extends TCPSocket {
                             packetSender.stop();
                             packetSenderThread.interrupt();
 
+                            // SYN-ACK
                             if(receivedPacket.SYN && receivedPacket.ACK) {
                                 MyTCPPacket ACKPacket = new MyTCPPacket();
                                 ACKPacket.ACK = true;
@@ -205,6 +217,7 @@ public class MyTCPSocket extends TCPSocket {
                                 socket.datagramSendPacket(ACKPacket);
                             }
 
+                            // ACK
                             else if(!receivedPacket.SYN && receivedPacket.ACK) {
                                 long ACKNumber = receivedPacket.getAcknowledgmentNumber();
                                 windowQueueMutex.lock();
@@ -213,13 +226,28 @@ public class MyTCPSocket extends TCPSocket {
                                     long expectedACKNumber = windowHeadPacket.getSequenceNumber() + windowHeadPacket.getData().length;
                                     if(ACKNumber >= expectedACKNumber) {
                                         windowQueue.poll();
+
+                                        int windowSize = senderHandler.getWindowSize();
+                                        if(windowSize < threshold)
+                                            senderHandler.setWindowSize(windowSize + Config.MSS);
+                                        else
+                                            senderHandler.setWindowSize(windowSize + (int)(Math.pow(Config.MSS, 2) / windowSize));
+
                                     } else {
+                                        duplicateACK++;
+                                        if(duplicateACK >= Config.MAX_DUPLICATE_ACK) {
+                                            threshold = senderHandler.getWindowSize() / 2;
+                                            senderHandler.setWindowSize(1);
+                                            duplicateACK = 0;
+                                        }
                                         break;
                                     }
+                                    onWindowChange();
                                 }
                                 windowQueueMutex.unlock();
                             }
 
+                            // DATA
                             else {
                                 System.out.println(String.format("%d - %d += %d", receivedPacket.getSequenceNumber(), destinationSequenceNumber, receivedPacket.getData().length));
                                 if(receivedPacket.getSequenceNumber() == destinationSequenceNumber) {
@@ -349,12 +377,9 @@ public class MyTCPSocket extends TCPSocket {
             send(packet);
         }
 
-        // EOF -> no data!
         MyTCPPacket packet = new MyTCPPacket();
         packet.setSequenceNumber(getSourceSequenceNumber(0));
         send(packet);
-
-        System.out.println(String.format("QUEUE SIZE: %d", sendQueue.size()));
     }
 
     private long getSourceSequenceNumber(long dataSize) {
@@ -388,11 +413,11 @@ public class MyTCPSocket extends TCPSocket {
 
     @Override
     public long getSSThreshold() {
-        throw new RuntimeException("Not implemented!");
+        return threshold;
     }
 
     @Override
     public long getWindowSize() {
-        throw new RuntimeException("Not implemented!");
+        return senderHandler.getWindowSize();
     }
 }
